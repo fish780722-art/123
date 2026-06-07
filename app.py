@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
 from datetime import date, timedelta
+from html import escape, unescape
 from math import isinf
 from pathlib import Path
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 import numpy as np
 import pandas as pd
@@ -109,6 +114,101 @@ def download_price_data(symbol: str, start_date: date, end_date: date) -> pd.Dat
         progress=False,
     )
     return normalize_downloaded_data(raw)
+
+
+@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
+def load_symbol_profile(symbol: str) -> dict[str, str]:
+    try:
+        info = yf.Ticker(symbol).get_info()
+    except Exception:
+        return {}
+
+    return {
+        "short_name": str(info.get("shortName") or "").strip(),
+        "long_name": str(info.get("longName") or "").strip(),
+    }
+
+
+@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
+def load_yahoo_search_name(symbol: str, lang: str, region: str) -> str:
+    query = urlencode(
+        {
+            "q": symbol,
+            "quotes_count": 8,
+            "news_count": 0,
+            "lang": lang,
+            "region": region,
+        }
+    )
+    request = Request(
+        f"https://query1.finance.yahoo.com/v1/finance/search?{query}",
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
+
+    try:
+        with urlopen(request, timeout=8) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return ""
+
+    quotes = payload.get("quotes", [])
+    if not isinstance(quotes, list):
+        return ""
+
+    normalized_symbol = symbol.upper()
+    for quote in quotes:
+        quote_symbol = str(quote.get("symbol") or "").upper()
+        if quote_symbol == normalized_symbol:
+            return str(quote.get("longname") or quote.get("shortname") or "").strip()
+
+    for quote in quotes:
+        name = str(quote.get("longname") or quote.get("shortname") or "").strip()
+        if name:
+            return name
+
+    return ""
+
+
+@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
+def load_market_page_name(symbol: str) -> str:
+    normalized_symbol = symbol.upper()
+    if normalized_symbol.endswith((".TW", ".TWO")):
+        url = f"https://tw.stock.yahoo.com/quote/{normalized_symbol}"
+        title_pattern = r"<title>(.*?)</title>"
+        name_pattern = r"^\s*([^(\s]+)"
+    elif normalized_symbol.endswith(".T"):
+        url = f"https://finance.yahoo.co.jp/quote/{normalized_symbol}"
+        title_pattern = r"<title>(.*?)</title>"
+        name_pattern = r"^\s*(.*?)【"
+    else:
+        return ""
+
+    request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urlopen(request, timeout=8) as response:
+            html = response.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+    title_match = re.search(title_pattern, html, re.IGNORECASE | re.DOTALL)
+    if not title_match:
+        return ""
+
+    title = unescape(title_match.group(1)).strip()
+    name_match = re.search(name_pattern, title)
+    if not name_match:
+        return ""
+
+    return name_match.group(1).strip()
+
+
+def resolve_symbol_names(symbol: str) -> tuple[str, str]:
+    profile = load_symbol_profile(symbol)
+    chinese_name = load_market_page_name(symbol) or load_yahoo_search_name(symbol, "zh-TW", "TW")
+    english_name = load_yahoo_search_name(symbol, "en-US", "US")
+    resolved_chinese_name = chinese_name or profile.get("short_name") or symbol
+    resolved_english_name = english_name or profile.get("long_name") or profile.get("short_name") or ""
+    return resolved_chinese_name, resolved_english_name
 
 
 def normalize_downloaded_data(raw: pd.DataFrame) -> pd.DataFrame:
@@ -647,6 +747,9 @@ def main() -> None:
         st.session_state["backtest_start_date"] = start_date
         st.session_state["backtest_end_date"] = end_date
         st.session_state["backtest_price_adjustment_mode"] = price_adjustment_mode
+        resolved_chinese_name, resolved_english_name = resolve_symbol_names(symbol)
+        st.session_state["backtest_symbol_chinese_name"] = resolved_chinese_name
+        st.session_state["backtest_symbol_english_name"] = resolved_english_name
 
     if "backtest_result" not in st.session_state:
         st.info("設定參數後按下「執行回測」。預設範例標的是台積電 2330.TW。")
@@ -657,6 +760,31 @@ def main() -> None:
     result_short_window = st.session_state["backtest_short_window"]
     result_long_window = st.session_state["backtest_long_window"]
     result_price_adjustment_mode = st.session_state.get("backtest_price_adjustment_mode", PRICE_ADJUSTMENT_MODES[0])
+    result_symbol_chinese_name = st.session_state.get("backtest_symbol_chinese_name", result_symbol)
+    result_symbol_english_name = st.session_state.get("backtest_symbol_english_name", "")
+    escaped_symbol_chinese_name = escape(result_symbol_chinese_name)
+    escaped_symbol_english_name = escape(result_symbol_english_name)
+    symbol_english_html = (
+        f"""
+            <div style="font-size: 1.15rem; font-weight: 500; line-height: 1.35; color: #6b7280; margin-top: 6px;">
+                {escaped_symbol_english_name}
+            </div>
+        """
+        if escaped_symbol_english_name
+        else ""
+    )
+
+    st.markdown(
+        f"""
+        <div style="margin: 8px 0 28px 0;">
+            <div style="font-size: 2.75rem; font-weight: 800; line-height: 1.15; color: #111827;">
+                {escaped_symbol_chinese_name}
+            </div>
+            {symbol_english_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     st.subheader("核心結果")
     st.caption(f"價格調整方式：{result_price_adjustment_mode}")
