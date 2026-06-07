@@ -29,6 +29,12 @@ class PriceDataUnavailableError(Exception):
     pass
 
 
+PRICE_ADJUSTMENT_MODES = [
+    "使用調整價回測（建議）",
+    "使用原始價格回測",
+]
+
+
 QUICK_RANGES: dict[str, int | None] = {
     "近一月": 31,
     "近三月": 93,
@@ -116,6 +122,29 @@ def normalize_downloaded_data(raw: pd.DataFrame) -> pd.DataFrame:
     data = data[columns].dropna(subset=["Close"])
     data.index = pd.to_datetime(data.index)
     return data.sort_index()
+
+
+def prepare_backtest_prices(data: pd.DataFrame, use_adjusted_price: bool) -> pd.DataFrame:
+    prepared = data.copy()
+    if not use_adjusted_price or "Adj Close" not in prepared.columns:
+        return prepared
+
+    close = prepared["Close"].replace(0, np.nan)
+    adjustment_factor = (prepared["Adj Close"] / close).replace([np.inf, -np.inf], np.nan)
+    adjustment_factor = adjustment_factor.ffill().bfill().fillna(1.0)
+
+    for column in ["Open", "High", "Low", "Close", "Adj Close"]:
+        if column in prepared.columns:
+            raw_column = f"Raw{column.replace(' ', '')}"
+            prepared[raw_column] = prepared[column]
+
+    for column in ["Open", "High", "Low"]:
+        if column in prepared.columns:
+            prepared[column] = prepared[column] * adjustment_factor
+
+    prepared["Close"] = prepared["Adj Close"]
+    prepared["AdjustmentFactor"] = adjustment_factor
+    return prepared
 
 
 def calculate_max_drawdown(equity: pd.Series) -> float:
@@ -494,6 +523,7 @@ def main() -> None:
         initial_capital = st.number_input("投入資金", min_value=1_000.0, value=1_000_000.0, step=10_000.0)
         short_window = st.number_input("短均線天數", min_value=2, value=5, step=1)
         long_window = st.number_input("長均線天數", min_value=3, value=20, step=1)
+        price_adjustment_mode = st.selectbox("價格調整方式", options=PRICE_ADJUSTMENT_MODES, index=0)
         marker_size = st.number_input("進出場標記大小", min_value=4, max_value=30, value=11, step=1)
         range_label = st.selectbox("交易區間", options=list(QUICK_RANGES.keys()), index=3)
 
@@ -531,6 +561,11 @@ def main() -> None:
             st.error("沒有抓到資料。請確認 yfinance 代號是否正確，或換一個日期區間。")
             return
 
+        price_data = prepare_backtest_prices(
+            price_data,
+            price_adjustment_mode == PRICE_ADJUSTMENT_MODES[0],
+        )
+
         if len(price_data) < long_window + 2:
             st.error("資料筆數不足，請拉長日期區間或降低長均線天數。")
             return
@@ -546,6 +581,7 @@ def main() -> None:
         st.session_state["backtest_long_window"] = int(long_window)
         st.session_state["backtest_start_date"] = start_date
         st.session_state["backtest_end_date"] = end_date
+        st.session_state["backtest_price_adjustment_mode"] = price_adjustment_mode
 
     if "backtest_result" not in st.session_state:
         st.info("設定參數後按下「執行回測」。預設範例標的是台積電 2330.TW。")
@@ -555,8 +591,10 @@ def main() -> None:
     result_symbol = st.session_state["backtest_symbol"]
     result_short_window = st.session_state["backtest_short_window"]
     result_long_window = st.session_state["backtest_long_window"]
+    result_price_adjustment_mode = st.session_state.get("backtest_price_adjustment_mode", PRICE_ADJUSTMENT_MODES[0])
 
     st.subheader("核心結果")
+    st.caption(f"價格調整方式：{result_price_adjustment_mode}")
     primary_metrics = ["期末資產", "報酬金額", "總報酬率", "勝率", "交易次數", "獲利因子", "最大回撤", "買入持有報酬率"]
     metric_columns = st.columns(4)
     for index, key in enumerate(primary_metrics):
