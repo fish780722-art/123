@@ -33,6 +33,7 @@ PRICE_ADJUSTMENT_MODES = [
     "使用調整價回測（建議）",
     "使用原始價格回測",
 ]
+SPLIT_GAP_THRESHOLD = 4.0
 
 
 QUICK_RANGES: dict[str, int | None] = {
@@ -144,7 +145,33 @@ def prepare_backtest_prices(data: pd.DataFrame, use_adjusted_price: bool) -> pd.
 
     prepared["Close"] = prepared["Adj Close"]
     prepared["AdjustmentFactor"] = adjustment_factor
+    prepared = repair_split_price_gaps(prepared)
     return prepared
+
+
+def repair_split_price_gaps(data: pd.DataFrame) -> pd.DataFrame:
+    repaired = data.copy()
+    close = repaired["Close"].replace(0, np.nan)
+    price_ratio = close / close.shift(1)
+    valid_ratio = price_ratio.replace([np.inf, -np.inf], np.nan).dropna()
+    split_points = valid_ratio[(valid_ratio >= SPLIT_GAP_THRESHOLD) | (valid_ratio <= 1 / SPLIT_GAP_THRESHOLD)]
+
+    repaired["SplitRepairFactor"] = 1.0
+    if split_points.empty:
+        return repaired
+
+    cumulative_factor = 1.0
+    repair_factor = pd.Series(1.0, index=repaired.index)
+    for split_date, ratio in split_points.sort_index(ascending=False).items():
+        cumulative_factor *= float(ratio)
+        repair_factor.loc[repair_factor.index < split_date] = cumulative_factor
+
+    for column in ["Open", "High", "Low", "Close"]:
+        if column in repaired.columns:
+            repaired[column] = repaired[column] * repair_factor
+
+    repaired["SplitRepairFactor"] = repair_factor
+    return repaired
 
 
 def calculate_max_drawdown(equity: pd.Series) -> float:
