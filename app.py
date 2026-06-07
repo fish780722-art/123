@@ -169,6 +169,129 @@ def load_yahoo_search_name(symbol: str, lang: str, region: str) -> str:
     return ""
 
 
+@st.cache_data(ttl=60 * 15, show_spinner=False)
+def load_symbol_search_results(search_text: str) -> list[dict[str, str]]:
+    query_text = search_text.strip()
+    if not query_text:
+        return []
+
+    results: dict[str, dict[str, str]] = {}
+    for item in load_twse_search_results(query_text):
+        results[item["symbol"]] = item
+
+    for lang, region in [("zh-TW", "TW"), ("en-US", "US")]:
+        query = urlencode(
+            {
+                "q": query_text,
+                "quotes_count": 12,
+                "news_count": 0,
+                "lang": lang,
+                "region": region,
+            }
+        )
+        request = Request(
+            f"https://query1.finance.yahoo.com/v1/finance/search?{query}",
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+
+        try:
+            with urlopen(request, timeout=8) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except Exception:
+            continue
+
+        quotes = payload.get("quotes", [])
+        if not isinstance(quotes, list):
+            continue
+
+        for quote in quotes:
+            symbol = str(quote.get("symbol") or "").strip().upper()
+            if not symbol or symbol in results:
+                continue
+
+            name = str(quote.get("longname") or quote.get("shortname") or "").strip()
+            exchange = str(quote.get("exchange") or quote.get("exchDisp") or "").strip()
+            quote_type = str(quote.get("quoteType") or "").strip()
+            results[symbol] = {
+                "symbol": symbol,
+                "name": name,
+                "exchange": exchange,
+                "quote_type": quote_type,
+            }
+
+    normalized_query = query_text.upper()
+    symbol_prefix_query = bool(re.fullmatch(r"[A-Z0-9.^-]+", normalized_query))
+    return sorted(
+        results.values(),
+        key=lambda item: (
+            0 if symbol_prefix_query and item["symbol"].startswith(normalized_query) else 1,
+            item["symbol"],
+        ),
+    )
+
+
+@st.cache_data(ttl=60 * 15, show_spinner=False)
+def load_twse_search_results(search_text: str) -> list[dict[str, str]]:
+    query_text = search_text.strip()
+    if not query_text:
+        return []
+
+    query = urlencode({"query": query_text})
+    request = Request(
+        f"https://www.twse.com.tw/rwd/zh/api/codeQuery?{query}",
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
+
+    try:
+        with urlopen(request, timeout=8) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return []
+
+    suggestions = payload.get("suggestions", [])
+    if not isinstance(suggestions, list):
+        return []
+
+    results: list[dict[str, str]] = []
+    for suggestion in suggestions:
+        fields = str(suggestion).split("\t", 1)
+        if len(fields) != 2:
+            continue
+
+        code = fields[0].strip().upper()
+        name = fields[1].strip()
+        is_common_stock_or_etf = len(code) in {4, 5} or (len(code) == 6 and code.startswith("00"))
+        if not code.isdigit() or not is_common_stock_or_etf:
+            continue
+
+        results.append(
+            {
+                "symbol": f"{code}.TW",
+                "name": name,
+                "exchange": "TWSE",
+                "quote_type": "EQUITY",
+            }
+        )
+
+        if len(results) >= 12:
+            break
+
+    return results
+
+
+def format_symbol_option(item: dict[str, str]) -> str:
+    parts = [item["symbol"]]
+    if item.get("name"):
+        parts.append(item["name"])
+    if item.get("exchange"):
+        parts.append(item["exchange"])
+    return " - ".join(parts)
+
+
+def is_symbol_like(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9.^=-]+(?:\.[A-Za-z0-9]+)?", value.strip()))
+
+
 @st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
 def load_market_page_name(symbol: str) -> str:
     normalized_symbol = symbol.upper()
@@ -675,7 +798,19 @@ def main() -> None:
 
     with st.sidebar:
         st.header("回測設定")
-        symbol = st.text_input("yfinance 標的代號", value="2330.TW").strip().upper()
+        symbol_query = st.text_input("搜尋標的", value="2330.TW").strip()
+        symbol_options = load_symbol_search_results(symbol_query)
+        if symbol_options:
+            option_labels = [format_symbol_option(option) for option in symbol_options]
+            selected_option_label = st.selectbox("選擇標的", options=option_labels)
+            selected_option = symbol_options[option_labels.index(selected_option_label)]
+            symbol = selected_option["symbol"]
+        elif is_symbol_like(symbol_query):
+            symbol = symbol_query.upper()
+            st.caption("找不到候選清單，將直接使用輸入的代號。")
+        else:
+            symbol = ""
+            st.caption("請輸入更多關鍵字，或改輸入完整 yfinance 代號。")
         initial_capital = st.number_input("投入資金", min_value=1_000.0, value=1_000_000.0, step=10_000.0)
         short_window = st.number_input("短均線天數", min_value=2, value=5, step=1)
         long_window = st.number_input("長均線天數", min_value=3, value=20, step=1)
