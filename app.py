@@ -89,6 +89,9 @@ METRIC_FORMATS = {
     "最大單筆虧損": "currency",
     "曝險比例": "percent",
 }
+HIDDEN_METRICS = {
+    "買入持有報酬率",
+}
 
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
@@ -779,7 +782,11 @@ def get_default_date_range(range_label: str) -> tuple[date, date]:
 
 def build_metrics_table(metrics: dict[str, float | int | str]) -> pd.DataFrame:
     return pd.DataFrame(
-        [{"分析數據": key, "數值": format_metric_value(key, value)} for key, value in metrics.items()]
+        [
+            {"分析數據": key, "數值": format_metric_value(key, value)}
+            for key, value in metrics.items()
+            if key not in HIDDEN_METRICS
+        ]
     )
 
 
