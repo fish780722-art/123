@@ -25,6 +25,10 @@ class BacktestResult:
     metrics: dict[str, float | int | str]
 
 
+class PriceDataUnavailableError(Exception):
+    pass
+
+
 QUICK_RANGES: dict[str, int | None] = {
     "近一月": 31,
     "近三月": 93,
@@ -77,6 +81,18 @@ METRIC_FORMATS = {
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def load_price_data(symbol: str, start_date: date, end_date: date) -> pd.DataFrame:
+    data = download_price_data(symbol, start_date, end_date)
+    if data.empty:
+        data = download_price_data(symbol, start_date - timedelta(days=7), end_date)
+        data = filter_display_data(data, start_date, end_date) if not data.empty else data
+
+    if data.empty:
+        raise PriceDataUnavailableError("No price data returned from yfinance.")
+
+    return data
+
+
+def download_price_data(symbol: str, start_date: date, end_date: date) -> pd.DataFrame:
     raw = yf.download(
         symbol,
         start=start_date,
@@ -506,7 +522,10 @@ def main() -> None:
 
     if run_button:
         with st.spinner("正在下載日 K 資料並計算回測..."):
-            price_data = load_price_data(symbol, start_date, end_date)
+            try:
+                price_data = load_price_data(symbol, start_date, end_date)
+            except PriceDataUnavailableError:
+                price_data = pd.DataFrame()
 
         if price_data.empty:
             st.error("沒有抓到資料。請確認 yfinance 代號是否正確，或換一個日期區間。")
