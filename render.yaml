@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: ma-cross-backtest
+    env: docker
+    plan: free
+    autoDeploy: true
